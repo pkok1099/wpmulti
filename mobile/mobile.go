@@ -11,6 +11,7 @@
 package mobile
 
 import (
+	"time"
 	"net"
 	"os"
 	"sync"
@@ -58,9 +59,9 @@ func getListener() StatusListener {
 func SetTempDir(dir string) {
 	wireproxy.TempParentDir = dir
 	if dir == "" {
-		_ = os.Unsetenv("TMPDIR")
+		os.Unsetenv("TMPDIR")
 	} else {
-		_ = os.Setenv("TMPDIR", dir)
+		os.Setenv("TMPDIR", dir)
 	}
 }
 
@@ -106,7 +107,7 @@ func Start(configDir, socksAddr, httpAddr string) string {
 	}
 	hln, err := net.Listen("tcp", httpAddr)
 	if err != nil {
-		_ = sln.Close()
+		sln.Close()
 		m.Close()
 		wireproxy.OnSessionUpHook = nil
 		msg := "http listen: " + err.Error()
@@ -116,8 +117,8 @@ func Start(configDir, socksAddr, httpAddr string) string {
 		return msg
 	}
 
-	go func() { _ = m.ServeSocks5(sln) }()
-	go func() { _ = m.ServeHTTP(hln) }()
+	go m.ServeSocks5(sln)
+	go m.ServeHTTP(hln)
 
 	mu.Lock()
 	mt = m
@@ -144,13 +145,19 @@ func Stop() {
 	running = false
 	mu.Unlock()
 	if sl != nil {
-		_ = sl.Close()
+		sl.Close()
 	}
 	if hl != nil {
-		_ = hl.Close()
+		hl.Close()
 	}
 	if m != nil {
-		m.Close()
+		// Close dengan timeout: jangan hang selamanya kalau ada deadlock.
+		done := make(chan struct{})
+		go func() { m.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 
