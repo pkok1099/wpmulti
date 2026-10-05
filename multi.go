@@ -149,7 +149,7 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = os.RemoveAll(tmpdir) }()
+	defer os.RemoveAll(tmpdir)
 	dnsCache := map[string]string{}
 	var fixedPaths []string
 	for _, p := range paths {
@@ -244,7 +244,7 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	}
 	wg.Wait()
 	if len(m.devs) == 0 {
-		_ = tunDev.Close()
+		tunDev.Close()
 		return nil, fmt.Errorf("tidak ada sesi yang berhasil up (%d gagal)", failed)
 	}
 	if failed > 0 {
@@ -276,14 +276,14 @@ func (m *MultiTun) SessionStatsJSON() string {
 			for _, line := range strings.Split(ipc, "\n") {
 				if strings.HasPrefix(line, "last_handshake_time_sec=") {
 					var sec int64
-					_, _ = fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
+					fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
 					if sec > 0 {
 						hsAge = now - sec
 					}
 				} else if strings.HasPrefix(line, "tx_bytes=") {
-					_, _ = fmt.Sscanf(line, "tx_bytes=%d", &tx)
+					fmt.Sscanf(line, "tx_bytes=%d", &tx)
 				} else if strings.HasPrefix(line, "rx_bytes=") {
-					_, _ = fmt.Sscanf(line, "rx_bytes=%d", &rx)
+					fmt.Sscanf(line, "rx_bytes=%d", &rx)
 				}
 			}
 		}
@@ -300,8 +300,10 @@ func (m *MultiTun) Close() {
 		d.Close()
 	}
 	m.devs = nil
+	// tun ditutup dulu agar dispatch yang blok di Read() terbangun;
+	// kalau mux.close() (wg.Wait) duluan -> deadlock.
+	m.tun.Close()
 	m.mux.close()
-	_ = m.tun.Close()
 }
 
 // DialContext dials through the shared stack; flowMux picks the tunnel.
