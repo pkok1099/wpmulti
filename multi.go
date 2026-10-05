@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/bufferpool"
@@ -166,40 +167,64 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	}
 
 	m := &MultiTun{tnet: tnet, tun: tunDev, mux: newFlowMux(tunDev, len(fixedPaths))}
+	var mu sync.Mutex
 	var alive []int
 	failed := 0
+	// Startup paralel (8 worker): tiap sesi independen, jadi aman.
+	// Sequential 100 sesi ~90 dtk di HP; paralel ~15 dtk.
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
 	for i, p := range fixedPaths {
-		conf, err := ParseConfig(p)
-		if err != nil {
-			log.Printf("parse %s: %v (dilewati)", paths[i], err)
-			failed++
-			continue
-		}
-		dtun := &deviceTun{Device: tunDev, q: m.mux.queues[i]}
-		dev := device.NewDevice(dtun, conn.NewDefaultBind(), device.NewLogger(logLevel, ""))
-		setting, err := CreateIPCRequest(conf.Device)
-		if err != nil {
-			dev.Close()
-			log.Printf("ipc %s: %v (dilewati)", paths[i], err)
-			failed++
-			continue
-		}
-		if err := dev.IpcSet(setting.IpcRequest); err != nil {
-			dev.Close()
-			log.Printf("ipcset %s: %v (dilewati)", paths[i], err)
-			failed++
-			continue
-		}
-		if err := dev.Up(); err != nil {
-			dev.Close()
-			log.Printf("up %s: %v (dilewati)", paths[i], err)
-			failed++
-			continue
-		}
-		m.devs = append(m.devs, dev)
-		alive = append(alive, i)
-		log.Printf("sesi %d up: %s", len(m.devs), paths[i])
+		wg.Add(1)
+		go func(i int, p string, origPath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			conf, err := ParseConfig(p)
+			if err != nil {
+				log.Printf("parse %s: %v (dilewati)", origPath, err)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			dtun := &deviceTun{Device: tunDev, q: m.mux.queues[i]}
+			// noStickyBind: skip netlink route listener (kernel caps them)
+			dev := device.NewDevice(dtun, &noStickyBind{conn.NewDefaultBind()}, device.NewLogger(logLevel, ""))
+			setting, err := CreateIPCRequest(conf.Device)
+			if err != nil {
+				dev.Close()
+				log.Printf("ipc %s: %v (dilewati)", origPath, err)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			if err := dev.IpcSet(setting.IpcRequest); err != nil {
+				dev.Close()
+				log.Printf("ipcset %s: %v (dilewati)", origPath, err)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			if err := dev.Up(); err != nil {
+				dev.Close()
+				log.Printf("up %s: %v (dilewati)", origPath, err)
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			m.devs = append(m.devs, dev)
+			alive = append(alive, i)
+			n := len(m.devs)
+			mu.Unlock()
+			log.Printf("sesi %d up: %s", n, origPath)
+		}(i, p, paths[i])
 	}
+	wg.Wait()
 	if len(m.devs) == 0 {
 		tunDev.Close()
 		return nil, fmt.Errorf("tidak ada sesi yang berhasil up (%d gagal)", failed)

@@ -21,12 +21,23 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
 type flowEntry struct {
 	devIdx   int
 	lastSeen time.Time
+}
+
+// noStickyBind wraps conn.Bind to disable wireguard-go's netlink route
+// listener (sticky sockets). Each device otherwise creates a netlink
+// socket bound to RTMGRP_IPV4_ROUTE, and kernels (notably Android's)
+// cap multicast group memberships — killing us at ~75 devices with
+// EINVAL. We don't need route-change notifications for short-lived
+// proxied connections. startRouteListener skips non-*StdNetBind types.
+type noStickyBind struct {
+	conn.Bind
 }
 
 // flowMux demultiplexes outbound packets from the shared stack to N

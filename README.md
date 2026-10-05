@@ -8,12 +8,12 @@ Forked from [windtf/wireproxy](https://github.com/windtf/wireproxy) — the sing
 
 Cloudflare WARP assigns a **different egress IPv6 per WireGuard session**, even for the same account. Running N `wireproxy` processes for N IPs wastes RAM (one full network stack per process). `wpmulti` runs N sessions in one process with **one shared gVisor netstack**:
 
-| Sessions | RAM (shared stack) |
-|----------|--------------------|
-| 20       | ~22 MB             |
-| 100      | ~57 MB             |
+| Sessions | RAM (idle) | Startup |
+|----------|------------|---------|
+| 100      | ~46 MB     | ~2 s    |
+| 200      | ~82 MB     | ~4 s    |
 
-(~0.5 MB marginal per session; ~12 MB base for the single stack.)
+(~0.4 MB marginal per session; ~12 MB base for the single stack. 1200 sessions ≈ 500 MB.)
 
 ## How it works
 
@@ -21,6 +21,8 @@ Cloudflare WARP assigns a **different egress IPv6 per WireGuard session**, even 
 - Each WireGuard device gets a `deviceTun` wrapper around the shared `tun.Device`.
 - A `flowMux` dispatcher reads outbound packets from the stack, extracts the 5-tuple (IP + TCP/UDP ports), and routes each **flow** to a tunnel: round-robin for new flows, sticky affinity afterwards. Sticky matters — a TCP connection split across tunnels would show two source IPs to the server and break.
 - Inbound packets from any tunnel go straight back into the shared stack, which demultiplexes by connection tuple. No mapping needed.
+- **No netlink route listener**: wireguard-go creates one netlink socket per device for sticky-socket route monitoring, but kernels (notably Android's) cap netlink multicast memberships — killing us at ~75 devices with `EINVAL`. `wpmulti` wraps the bind so the listener is skipped; we don't need route-change notifications for proxied connections.
+- **Parallel startup**: sessions come up in 8 parallel workers (~2 s for 100 sessions vs ~90 s sequential).
 - One bad config never kills the rest: per-session failures are logged and skipped.
 
 ## Usage
