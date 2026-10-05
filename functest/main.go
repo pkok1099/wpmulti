@@ -32,7 +32,7 @@ func main() {
 		fmt.Println("Request GAGAL:", err)
 	} else {
 		b, _ := io.ReadAll(r.Body)
-		r.Body.Close()
+		_ = r.Body.Close()
 		fmt.Println("IP egress:", string(b))
 	}
 	mobile.Stop()

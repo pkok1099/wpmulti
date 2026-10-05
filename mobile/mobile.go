@@ -58,9 +58,9 @@ func getListener() StatusListener {
 func SetTempDir(dir string) {
 	wireproxy.TempParentDir = dir
 	if dir == "" {
-		os.Unsetenv("TMPDIR")
+		_ = os.Unsetenv("TMPDIR")
 	} else {
-		os.Setenv("TMPDIR", dir)
+		_ = os.Setenv("TMPDIR", dir)
 	}
 }
 
@@ -106,7 +106,7 @@ func Start(configDir, socksAddr, httpAddr string) string {
 	}
 	hln, err := net.Listen("tcp", httpAddr)
 	if err != nil {
-		sln.Close()
+		_ = sln.Close()
 		m.Close()
 		wireproxy.OnSessionUpHook = nil
 		msg := "http listen: " + err.Error()
@@ -116,8 +116,8 @@ func Start(configDir, socksAddr, httpAddr string) string {
 		return msg
 	}
 
-	go m.ServeSocks5(sln)
-	go m.ServeHTTP(hln)
+	go func() { _ = m.ServeSocks5(sln) }()
+	go func() { _ = m.ServeHTTP(hln) }()
 
 	mu.Lock()
 	mt = m
@@ -144,10 +144,10 @@ func Stop() {
 	running = false
 	mu.Unlock()
 	if sl != nil {
-		sl.Close()
+		_ = sl.Close()
 	}
 	if hl != nil {
-		hl.Close()
+		_ = hl.Close()
 	}
 	if m != nil {
 		m.Close()

@@ -51,7 +51,7 @@ func main() {
 		mux := http.NewServeMux()
 		mux.Handle("/debug/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, m.SessionStatsJSON())
+			_, _ = fmt.Fprint(w, m.SessionStatsJSON())
 		}))
 		// pprof: /debug/pprof/
 		mux.Handle("/debug/pprof/", http.DefaultServeMux)

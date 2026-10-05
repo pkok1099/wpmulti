@@ -149,7 +149,7 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpdir)
+	defer func() { _ = os.RemoveAll(tmpdir) }()
 	dnsCache := map[string]string{}
 	var fixedPaths []string
 	for _, p := range paths {
@@ -244,7 +244,7 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	}
 	wg.Wait()
 	if len(m.devs) == 0 {
-		tunDev.Close()
+		_ = tunDev.Close()
 		return nil, fmt.Errorf("tidak ada sesi yang berhasil up (%d gagal)", failed)
 	}
 	if failed > 0 {
@@ -276,14 +276,14 @@ func (m *MultiTun) SessionStatsJSON() string {
 			for _, line := range strings.Split(ipc, "\n") {
 				if strings.HasPrefix(line, "last_handshake_time_sec=") {
 					var sec int64
-					fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
+					_, _ = fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
 					if sec > 0 {
 						hsAge = now - sec
 					}
 				} else if strings.HasPrefix(line, "tx_bytes=") {
-					fmt.Sscanf(line, "tx_bytes=%d", &tx)
+					_, _ = fmt.Sscanf(line, "tx_bytes=%d", &tx)
 				} else if strings.HasPrefix(line, "rx_bytes=") {
-					fmt.Sscanf(line, "rx_bytes=%d", &rx)
+					_, _ = fmt.Sscanf(line, "rx_bytes=%d", &rx)
 				}
 			}
 		}
