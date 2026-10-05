@@ -24,7 +24,7 @@ func main() {
 		return
 	}
 	fmt.Println("Running:", mobile.IsRunning(), "Sesi:", mobile.SessionCount())
-	time.Sleep(10)
+	time.Sleep(10 * time.Second)
 	pu, _ := url.Parse("http://127.0.0.1:2190")
 	c := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(pu)}, Timeout: 20 * time.Second}
 	r, err := c.Get("https://api6.ipify.org")

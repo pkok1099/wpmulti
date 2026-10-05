@@ -301,7 +301,7 @@ func (m *MultiTun) Close() {
 	}
 	m.devs = nil
 	m.mux.close()
-	m.tun.Close()
+	_ = m.tun.Close()
 }
 
 // DialContext dials through the shared stack; flowMux picks the tunnel.
