@@ -19,7 +19,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/bufferpool"
@@ -113,6 +115,18 @@ type MultiTun struct {
 // session per file, all sharing a single network stack. Each file only
 // needs [Interface] + [Peer] (a plain wgcf-profile.conf works); proxy
 // sections, if present, are ignored — listeners are configured separately.
+// OnSessionUpHook dipanggil tiap sesi berhasil up selama StartMultiTun.
+// Nil = mati (default, dipakai CLI). Package mobile mengisinya untuk
+// progress callback ke Java/Kotlin. Dipanggil dari worker goroutine.
+var OnSessionUpHook func(up, total int)
+
+// TempParentDir overrides the parent directory for temporary files created
+// by StartMultiTun (which uses os.MkdirTemp). Empty = system default.
+// The mobile package sets this to the app's cache dir because Android apps
+// cannot write to the default temp dir (/data/local/tmp).
+// (More reliable than TMPDIR env var across Go versions.)
+var TempParentDir = ""
+
 func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 	entries, err := os.ReadDir(confDir)
 	if err != nil {
@@ -131,7 +145,7 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 
 	// Tulis ulang conf ke temp dir dengan endpoint hostname -> IP,
 	// agar tidak tergantung DNS sistem (yang bisa mati total).
-	tmpdir, err := os.MkdirTemp("", "wpm-conf-*")
+	tmpdir, err := os.MkdirTemp(TempParentDir, "wpm-conf-*")
 	if err != nil {
 		return nil, err
 	}
@@ -220,8 +234,12 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 			m.devs = append(m.devs, dev)
 			alive = append(alive, i)
 			n := len(m.devs)
+			total := len(fixedPaths)
 			mu.Unlock()
 			log.Printf("sesi %d up: %s", n, origPath)
+			if OnSessionUpHook != nil {
+				OnSessionUpHook(n, total)
+			}
 		}(i, p, paths[i])
 	}
 	wg.Wait()
@@ -240,6 +258,41 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 
 // Count returns the number of active sessions.
 func (m *MultiTun) Count() int { return len(m.devs) }
+
+// SessionStatsJSON returns per-session stats as JSON:
+// [{"index":0,"handshake_age_sec":12,"tx_bytes":1234,"rx_bytes":5678}, ...]
+// handshake_age_sec = -1 if no handshake yet.
+func (m *MultiTun) SessionStatsJSON() string {
+	var sb strings.Builder
+	sb.WriteString("[")
+	now := time.Now().Unix()
+	for i, d := range m.devs {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		hsAge := int64(-1)
+		var tx, rx int64
+		if ipc, err := d.IpcGet(); err == nil {
+			for _, line := range strings.Split(ipc, "\n") {
+				if strings.HasPrefix(line, "last_handshake_time_sec=") {
+					var sec int64
+					fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
+					if sec > 0 {
+						hsAge = now - sec
+					}
+				} else if strings.HasPrefix(line, "tx_bytes=") {
+					fmt.Sscanf(line, "tx_bytes=%d", &tx)
+				} else if strings.HasPrefix(line, "rx_bytes=") {
+					fmt.Sscanf(line, "rx_bytes=%d", &rx)
+				}
+			}
+		}
+		fmt.Fprintf(&sb, `{"index":%d,"handshake_age_sec":%d,"tx_bytes":%d,"rx_bytes":%d}`,
+			i, hsAge, tx, rx)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
 
 // Close shuts down all sessions and the shared stack.
 func (m *MultiTun) Close() {
@@ -275,30 +328,51 @@ func (m *MultiTun) Resolve(ctx context.Context, name string) (context.Context, n
 	return ctx, nil, fmt.Errorf("tidak ada IP untuk %s", name)
 }
 
-// SpawnSocks5 starts ONE SOCKS5 listener shared by all sessions.
-// Tunnel selection happens per-flow inside flowMux.
-func (m *MultiTun) SpawnSocks5(bindAddress string) {
+// newSocks5Server builds the shared SOCKS5 server (one for all sessions).
+func (m *MultiTun) newSocks5Server() *socks5.Server {
 	options := []socks5.Option{
 		socks5.WithAuthMethods([]socks5.Authenticator{socks5.NoAuthAuthenticator{}}),
 		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
 		socks5.WithDial(m.DialContext),
 		socks5.WithResolver(m),
 	}
-	server := socks5.NewServer(options...)
+	return socks5.NewServer(options...)
+}
+
+// ServeSocks5 serves SOCKS5 on a pre-bound listener (for library use,
+// where bind errors must be reported instead of log.Fatal).
+func (m *MultiTun) ServeSocks5(ln net.Listener) error {
+	return m.newSocks5Server().Serve(ln)
+}
+
+// SpawnSocks5 starts ONE SOCKS5 listener shared by all sessions.
+// Tunnel selection happens per-flow inside flowMux.
+func (m *MultiTun) SpawnSocks5(bindAddress string) {
+	server := m.newSocks5Server()
 	log.Printf("SOCKS5 %s -> %d sesi (shared stack)", bindAddress, m.Count())
 	if err := server.ListenAndServe("tcp", bindAddress); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// SpawnHTTP starts ONE HTTP proxy listener shared by all sessions.
-func (m *MultiTun) SpawnHTTP(bindAddress string) {
-	config := &HTTPConfig{BindAddress: bindAddress}
-	server := &HTTPServer{
-		config: config,
+// newHTTPServer builds the shared HTTP proxy server (one for all sessions).
+func (m *MultiTun) newHTTPServer(bindAddress string) *HTTPServer {
+	return &HTTPServer{
+		config: &HTTPConfig{BindAddress: bindAddress},
 		dial:   m.dial,
 		auth:   CredentialValidator{},
 	}
+}
+
+// ServeHTTP serves the HTTP proxy on a pre-bound listener (for library use,
+// where bind errors must be reported instead of log.Fatal).
+func (m *MultiTun) ServeHTTP(ln net.Listener) error {
+	return m.newHTTPServer("").Serve(ln)
+}
+
+// SpawnHTTP starts ONE HTTP proxy listener shared by all sessions.
+func (m *MultiTun) SpawnHTTP(bindAddress string) {
+	server := m.newHTTPServer(bindAddress)
 	log.Printf("HTTP %s -> %d sesi (shared stack)", bindAddress, m.Count())
 	if err := server.ListenAndServe("tcp", bindAddress); err != nil {
 		log.Fatal(err)

@@ -9,7 +9,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,6 +25,7 @@ func main() {
 	confDir := flag.String("conf-dir", "", "direktori berisi *.conf WireGuard (1 file = 1 sesi/IP)")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "alamat listen SOCKS5")
 	httpAddr := flag.String("http", "127.0.0.1:2080", "alamat listen HTTP proxy")
+	debugAddr := flag.String("debug", "", "alamat listen debug (pprof + /debug/sessions), kosong = mati")
 	silent := flag.Bool("s", false, "silent mode (log wireguard mati)")
 	flag.Parse()
 
@@ -42,6 +46,22 @@ func main() {
 
 	go m.SpawnSocks5(*socksAddr)
 	go m.SpawnHTTP(*httpAddr)
+
+	if *debugAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/debug/sessions", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, m.SessionStatsJSON())
+		}))
+		// pprof: /debug/pprof/
+		mux.Handle("/debug/pprof/", http.DefaultServeMux)
+		go func() {
+			log.Printf("debug di %s", *debugAddr)
+			if err := http.ListenAndServe(*debugAddr, mux); err != nil {
+				log.Printf("debug server: %v", err)
+			}
+		}()
+	}
 
 	log.Printf("wpmulti siap: %d sesi", m.Count())
 

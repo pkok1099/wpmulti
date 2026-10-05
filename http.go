@@ -171,6 +171,20 @@ func (s *HTTPServer) listen(network, addr string) (net.Listener, error) {
 	return net.Listen(network, addr)
 }
 
+// Serve serves HTTP proxy on a pre-bound listener (for library use).
+func (s *HTTPServer) Serve(ln net.Listener) error {
+	defer func() { _ = ln.Close() }()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return fmt.Errorf("accept request failed: %w", err)
+		}
+		go func(conn net.Conn) {
+			s.serve(conn)
+		}(conn)
+	}
+}
+
 // ListenAndServe is used to create a listener and serve on it
 func (s *HTTPServer) ListenAndServe(network, addr string) error {
 	server, err := s.listen(network, addr)
