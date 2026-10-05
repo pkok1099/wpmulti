@@ -166,12 +166,19 @@ func (m *flowMux) sweep() {
 	}
 }
 
-func (m *flowMux) close() {
-	close(m.closed)
-	m.wg.Wait()
+// closeQueues menutup semua queue channel. WAJIB dipanggil SEBELUM
+// WireGuard device Close(): deviceTun.Read() blok di <-q, dan d.Close()
+// menunggu reader goroutine selesai -> deadlock kalau queue belum ditutup.
+func (m *flowMux) closeQueues() {
 	for _, q := range m.queues {
 		close(q)
 	}
+}
+
+func (m *flowMux) close() {
+	close(m.closed)
+	m.wg.Wait()
+	// queues sudah ditutup via closeQueues()
 	if d := atomic.LoadUint64(&m.dropped); d > 0 {
 		log.Printf("flowMux: %d paket dibuang (queue penuh)", d)
 	}

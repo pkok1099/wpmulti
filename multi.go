@@ -296,13 +296,18 @@ func (m *MultiTun) SessionStatsJSON() string {
 
 // Close shuts down all sessions and the shared stack.
 func (m *MultiTun) Close() {
+	// Urutan shutdown (ketiganya saling deadlock kalau tertukar):
+	// 1. closeQueues: bangunkan deviceTun.Read() yang blok di <-q,
+	//    agar d.Close() di bawah tidak menunggu selamanya.
+	m.mux.closeQueues()
+	// 2. Tutup semua WireGuard device (reader sudah terbangun).
 	for _, d := range m.devs {
 		d.Close()
 	}
 	m.devs = nil
-	// tun ditutup dulu agar dispatch yang blok di Read() terbangun;
-	// kalau mux.close() (wg.Wait) duluan -> deadlock.
+	// 3. tun.Close: bangunkan flowMux dispatch yang blok di tun.Read().
 	m.tun.Close()
+	// 4. mux.close: signal closed + wg.Wait() untuk dispatch/sweep.
 	m.mux.close()
 }
 
