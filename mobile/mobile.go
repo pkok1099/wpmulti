@@ -11,10 +11,11 @@
 package mobile
 
 import (
-	"time"
 	"net"
 	"os"
+	"runtime/debug"
 	"sync"
+	"time"
 
 	wireproxy "github.com/pkok1099/wpmulti"
 	"golang.zx2c4.com/wireguard/device"
@@ -176,4 +177,13 @@ func SessionCount() int {
 		return 0
 	}
 	return mt.Count()
+}
+
+// FreeOSMemory memaksa GC penuh lalu mengembalikan memori idle ke OS
+// (runtime/debug.FreeOSMemory: GC + scavenge seketika, bukan menunggu
+// scavenger latar). Dipanggil GoEngineService secara periodik HANYA saat
+// engine idle (TX/RX 0 selama beberapa interval berturut-turut) — jangan
+// dipanggil saat trafik aktif.
+func FreeOSMemory() {
+	debug.FreeOSMemory()
 }

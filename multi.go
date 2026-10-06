@@ -31,6 +31,15 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
+// socksBufSize - ukuran satu buffer relay SOCKS5 (go-socks5 bufferpool).
+// Buffer ini dipakai io.CopyBuffer di handleConnect (handle.go:389:
+// io.CopyBuffer(dst, src, buf[:cap(buf))]) sehingga ukuran copy SELALU
+// sama dengan ukuran pool - satu sumber konstanta ini.
+// 32 KB = default bawaan go-socks5 (server.go:74 NewPool(32*1024)).
+// Sebelumnya 256 KB: heap.prof mencatat 46,38 MB inuse untuk ~185 buffer
+// (185 x 256 KB); dengan 32 KB turun menjadi ~5,9 MB (hemat ~40 MB).
+const socksBufSize = 32 * 1024
+
 // endpointRe menemukan baris "Endpoint = host:port" di config WireGuard.
 var endpointRe = regexp.MustCompile(`(?im)^\s*endpoint\s*=\s*([^\s:;\]]+)(:\d+)?\s*$`)
 
@@ -339,7 +348,7 @@ func (m *MultiTun) Resolve(ctx context.Context, name string) (context.Context, n
 func (m *MultiTun) newSocks5Server() *socks5.Server {
 	options := []socks5.Option{
 		socks5.WithAuthMethods([]socks5.Authenticator{socks5.NoAuthAuthenticator{}}),
-		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
+		socks5.WithBufferPool(bufferpool.NewPool(socksBufSize)),
 		socks5.WithDial(m.DialContext),
 		socks5.WithResolver(m),
 	}
