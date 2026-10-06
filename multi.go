@@ -116,8 +116,11 @@ func rewriteEndpoints(content []byte, cache map[string]string) []byte {
 type MultiTun struct {
 	tnet *netstack.Net
 	devs []*device.Device
-	mux  *flowMux
-	tun  tun.Device // underlying shared device (closed on Close)
+	// devMu melindungi devs: Count/SessionStatsJSON/Close bisa dipanggil
+	// dari thread Java sementara startup goroutine masih append.
+	devMu sync.RWMutex
+	mux   *flowMux
+	tun   tun.Device // underlying shared device (closed on Close)
 }
 
 // StartMultiTun parses every *.conf in confDir and brings up one WireGuard
@@ -240,7 +243,9 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 				return
 			}
 			mu.Lock()
+			m.devMu.Lock()
 			m.devs = append(m.devs, dev)
+			m.devMu.Unlock()
 			alive = append(alive, i)
 			n := len(m.devs)
 			total := len(fixedPaths)
@@ -252,7 +257,10 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 		}(i, p, paths[i])
 	}
 	wg.Wait()
-	if len(m.devs) == 0 {
+	m.devMu.RLock()
+	ndevs := len(m.devs)
+	m.devMu.RUnlock()
+	if ndevs == 0 {
 		tunDev.Close()
 		return nil, fmt.Errorf("tidak ada sesi yang berhasil up (%d gagal)", failed)
 	}
@@ -266,7 +274,11 @@ func StartMultiTun(confDir string, logLevel int) (*MultiTun, error) {
 }
 
 // Count returns the number of active sessions.
-func (m *MultiTun) Count() int { return len(m.devs) }
+func (m *MultiTun) Count() int {
+	m.devMu.RLock()
+	defer m.devMu.RUnlock()
+	return len(m.devs)
+}
 
 // SessionStatsJSON returns per-session stats as JSON:
 // [{"index":0,"handshake_age_sec":12,"tx_bytes":1234,"rx_bytes":5678}, ...]
@@ -275,24 +287,30 @@ func (m *MultiTun) SessionStatsJSON() string {
 	var sb strings.Builder
 	sb.WriteString("[")
 	now := time.Now().Unix()
-	for i, d := range m.devs {
+	m.devMu.RLock()
+	devs := make([]*device.Device, len(m.devs))
+	copy(devs, m.devs)
+	m.devMu.RUnlock()
+	for i, d := range devs {
 		if i > 0 {
 			sb.WriteString(",")
 		}
 		hsAge := int64(-1)
 		var tx, rx int64
-		if ipc, err := d.IpcGet(); err == nil {
-			for _, line := range strings.Split(ipc, "\n") {
-				if strings.HasPrefix(line, "last_handshake_time_sec=") {
-					var sec int64
-					fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
-					if sec > 0 {
-						hsAge = now - sec
+		if d != nil {
+			if ipc, err := d.IpcGet(); err == nil {
+				for _, line := range strings.Split(ipc, "\n") {
+					if strings.HasPrefix(line, "last_handshake_time_sec=") {
+						var sec int64
+						fmt.Sscanf(line, "last_handshake_time_sec=%d", &sec)
+						if sec > 0 {
+							hsAge = now - sec
+						}
+					} else if strings.HasPrefix(line, "tx_bytes=") {
+						fmt.Sscanf(line, "tx_bytes=%d", &tx)
+					} else if strings.HasPrefix(line, "rx_bytes=") {
+						fmt.Sscanf(line, "rx_bytes=%d", &rx)
 					}
-				} else if strings.HasPrefix(line, "tx_bytes=") {
-					fmt.Sscanf(line, "tx_bytes=%d", &tx)
-				} else if strings.HasPrefix(line, "rx_bytes=") {
-					fmt.Sscanf(line, "rx_bytes=%d", &rx)
 				}
 			}
 		}
@@ -310,10 +328,14 @@ func (m *MultiTun) Close() {
 	//    agar d.Close() di bawah tidak menunggu selamanya.
 	m.mux.closeQueues()
 	// 2. Tutup semua WireGuard device (reader sudah terbangun).
-	for _, d := range m.devs {
+	//    Snapshot + nil-kan di bawah devMu (race fix fix/android-audit).
+	m.devMu.Lock()
+	devs := m.devs
+	m.devs = nil
+	m.devMu.Unlock()
+	for _, d := range devs {
 		d.Close()
 	}
-	m.devs = nil
 	// 3. tun.Close: bangunkan flowMux dispatch yang blok di tun.Read().
 	m.tun.Close()
 	// 4. mux.close: signal closed + wg.Wait() untuk dispatch/sweep.
@@ -348,6 +370,11 @@ func (m *MultiTun) Resolve(ctx context.Context, name string) (context.Context, n
 func (m *MultiTun) newSocks5Server() *socks5.Server {
 	options := []socks5.Option{
 		socks5.WithAuthMethods([]socks5.Authenticator{socks5.NoAuthAuthenticator{}}),
+		// Optimasi RAM (TAHAP 1 heap.prof): 32KB per buffer,
+		// bukan default 256KB go-socks5. Pool di-reuse antar
+		// koneksi; pada ratusan koneksi konkuren, 256KB/buffer
+		// = puluhan MB. 32KB tetap aman utk throughput karena
+		// relay io.CopyBuffer dipecah per-chunk dgn buffer pool.
 		socks5.WithBufferPool(bufferpool.NewPool(socksBufSize)),
 		socks5.WithDial(m.DialContext),
 		socks5.WithResolver(m),

@@ -14,7 +14,6 @@ package wireproxy
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -63,7 +62,11 @@ func newFlowMux(t tun.Device, n int) *flowMux {
 		closed: make(chan struct{}),
 	}
 	for i := range m.queues {
-		m.queues[i] = make(chan []byte, 512)
+		// Optimasi RAM: 128 slot (sebelumnya 512). Dengan 1200 sesi,
+		// 512 slot/channel = ~6MB channel + paket-paket yang menumpuk
+		// di dalamnya. 128 cukup: queue penuh -> drop -> TCP di
+		// netstack retransmit (jalur penanganannya sudah ada).
+		m.queues[i] = make(chan []byte, 128)
 	}
 	return m
 }
@@ -208,43 +211,71 @@ func (d *deviceTun) Close() error { return nil }
 
 // flowKey extracts a 5-tuple (3-tuple for non-TCP/UDP) from an IP packet.
 // Unparseable packets share the "" flow.
+//
+// Dipanggil untuk SETIAP paket keluar (jalur panas): key dibangun ke
+// buffer stack tanpa fmt.Sprintf (sebelumnya beberapa alokasi + boxing
+// per paket -> tekanan GC tinggi saat throughput besar).
 func flowKey(pkt []byte) string {
 	if len(pkt) < 1 {
 		return ""
 	}
+	var buf [80]byte // v6 + ports = 73 byte maksimum
 	switch pkt[0] >> 4 {
 	case 4:
 		if len(pkt) < 20 {
 			return ""
 		}
 		proto := pkt[9]
-		src, dst := pkt[12:16], pkt[16:20]
 		if proto != 6 && proto != 17 {
-			return fmt.Sprintf("%d|%x|%x", proto, src, dst)
+			return string(appendKey(buf[:0], proto,
+				pkt[12:16], pkt[16:20], 0, 0, false))
 		}
 		hlen := int(pkt[0]&0x0f) * 4
 		if len(pkt) < hlen+4 {
-			return fmt.Sprintf("%d|%x|%x", proto, src, dst)
+			return string(appendKey(buf[:0], proto,
+				pkt[12:16], pkt[16:20], 0, 0, false))
 		}
-		return fmt.Sprintf("%d|%x|%x|%d|%d", proto, src, dst,
+		return string(appendKey(buf[:0], proto,
+			pkt[12:16], pkt[16:20],
 			binary.BigEndian.Uint16(pkt[hlen:]),
-			binary.BigEndian.Uint16(pkt[hlen+2:]))
+			binary.BigEndian.Uint16(pkt[hlen+2:]), true))
 	case 6:
 		if len(pkt) < 40 {
 			return ""
 		}
 		proto := pkt[6]
-		src, dst := pkt[8:24], pkt[24:40]
-		if proto != 6 && proto != 17 {
-			return fmt.Sprintf("%d|%x|%x", proto, src, dst)
-		}
 		// NB: IPv6 extension headers not handled (our traffic has none).
-		if len(pkt) < 44 {
-			return fmt.Sprintf("%d|%x|%x", proto, src, dst)
+		if (proto != 6 && proto != 17) || len(pkt) < 44 {
+			return string(appendKey(buf[:0], proto,
+				pkt[8:24], pkt[24:40], 0, 0, false))
 		}
-		return fmt.Sprintf("%d|%x|%x|%d|%d", proto, src, dst,
+		return string(appendKey(buf[:0], proto,
+			pkt[8:24], pkt[24:40],
 			binary.BigEndian.Uint16(pkt[40:]),
-			binary.BigEndian.Uint16(pkt[40+2:]))
+			binary.BigEndian.Uint16(pkt[42:]), true))
 	}
 	return ""
+}
+
+// appendKey menulis "proto|src|dst[|p1|p2]" ke dst (kapasitas cukup).
+func appendKey(dst []byte, proto byte, src, dstA []byte,
+	p1, p2 uint16, ports bool) []byte {
+	dst = append(dst, proto, '|')
+	dst = appendHex(dst, src)
+	dst = append(dst, '|')
+	dst = appendHex(dst, dstA)
+	if ports {
+		dst = append(dst, '|')
+		dst = append(dst, byte(p1>>8), byte(p1), '|')
+		dst = append(dst, byte(p2>>8), byte(p2))
+	}
+	return dst
+}
+
+func appendHex(dst, s []byte) []byte {
+	const hexd = "0123456789abcdef"
+	for _, c := range s {
+		dst = append(dst, hexd[c>>4], hexd[c&0x0f])
+	}
+	return dst
 }
